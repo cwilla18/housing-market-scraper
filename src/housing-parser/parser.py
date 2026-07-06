@@ -114,7 +114,7 @@ def handle_get_request(agency, elements, url):
     session = requests.Session()
     session.headers.update(build_headers())
     response = session.get(url, timeout=20)
-    #if response.status_code != 200:
+
     if not web_request_successful(response):
         print(f"Failed to retrieve the page for {agency}. Status code: {response.status_code}")
         return []
@@ -125,6 +125,7 @@ def handle_get_request(agency, elements, url):
     
     # Handle pagination
     pagination_type = elements.get("pagination_type")
+    
     if pagination_type == "follow_next":
         extracted_items += paginate_follow_next(soup, elements, url, agency, session)
     else:
@@ -244,15 +245,20 @@ def get_items(soup, elements, agency):
     else:
         items = soup.find_all(class_=elements["list_box"])
     
+    idStart = jsonImport.get_json_file_count(reserve=len(items))
+
     for item in items:
-        property_data = extract_property_data(item, elements, agency)
+        property_data = extract_property_data(item, elements, agency, idStart)
+
+        idStart += 1
+
         if property_data:
             extract.append(property_data)
     
     return extract
 
 
-def extract_property_data(item, elements, agency):
+def extract_property_data(item, elements, agency, id):
     """Extract all property fields from an item and handle database logic"""
     address = extract_address(item, elements)
     price = extract_price(item, elements)
@@ -268,13 +274,15 @@ def extract_property_data(item, elements, agency):
         return None
     
     return model.property_model(
+        id = id,
         date_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         agency=agency,
         address=address,
         price=price,
         old_price=0,
         image_url=image,
-        house_url=link
+        house_url=link,
+        active = True
     )
 
 

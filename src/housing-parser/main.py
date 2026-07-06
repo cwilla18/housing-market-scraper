@@ -31,10 +31,12 @@ def check_internet_connection():
 
 
 if check_internet_connection():
-    print("Internet connection found. Begin parsing")
-    parser.parse_information()
-    print("Property agencies have been crawled. Application is closing")
-    exit(1)
+    try:
+        print("Internet connection found. Begin parsing")
+        parser.parse_information()
+        print("Property agencies have been crawled. Application is closing")
+    except Exception as e:
+        print(f"Exception: {e}")
 else:
     print("Exiting the application.")
     exit(1)
