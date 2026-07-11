@@ -1,169 +1,97 @@
 import json
+import logging
 import os
-import threading
+import tempfile
 from dataclasses import asdict
 
 import config
+import model
+import constValues as const
 
-# Lock to serialize file read/write and id assignment across threads
-_file_lock = threading.Lock()
-_next_id = None
-
-
-def check_and_create_json_file(json_save_path = None):
-    if json_save_path is None:
-        json_save_path = os.path.join(
-            config.general["base_dir"],
-            config.general["file_type"],
-            config.general["file_name"],
-        )
-
-    if os.path.exists(json_save_path):
-        with open(json_save_path, "r", encoding="utf-8") as file:
-            content = file.read().strip()
-            if not content:
-                return []
-            return json.loads(content)
-
-    print(f"{json_save_path} not found. Creating a new file.")
-    os.makedirs(os.path.dirname(json_save_path), exist_ok=True)
-    with open(json_save_path, "w", encoding="utf-8") as file:
-        json.dump([], file)
-    return []
+logger = logging.getLogger(__name__)
 
 
-def save_data_to_json(data):
-    json_save_path = os.path.join(
+def _data_path():
+    return os.path.join(
         config.general["base_dir"],
         config.general["file_type"],
         config.general["file_name"],
     )
 
-    with _file_lock:
-        existing_data = check_and_create_json_file(json_save_path)
 
-        existing_ids = [item.get("id") for item in existing_data if isinstance(item, dict) and "id" in item]
-        try:
-            numeric_ids = [int(i) for i in existing_ids]
-            next_id = max(numeric_ids) + 1 if numeric_ids else 1
-        except Exception:
-            next_id = len(existing_data) + 1
+def load_data():
+    path = _data_path()
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    return json.loads(content) if content else []
 
-        existing_addresses = {
-            item.get("address"): item
-            for item in existing_data
-            if isinstance(item, dict) and item.get("address")
-        }
 
-        new_entries = []
-        seen_addresses = set()
-        for obj in data:
-            entry = asdict(obj)
-            address = entry.get("address")
-            if not address or address in seen_addresses:
-                continue
-            seen_addresses.add(address)
+def _atomic_write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
-            if address in existing_addresses:
-                existing_entry = existing_addresses[address]
-                if entry.get("price") != existing_entry.get("price"):
-                    existing_entry["old_price"] = existing_entry.get("price", 0)
-                    existing_entry["price"] = entry.get("price")
-                continue
 
-            entry_id = entry.get("id")
-            try:
-                entry_id = int(entry_id) if entry_id is not None else None
-            except Exception:
-                entry_id = None
+def _normalize(record):
+    record[const.PRICE] = model.parse_price(record.get(const.PRICE)) or 0
+    record["old_price"] = model.parse_price(record.get("old_price")) or 0
+    record.setdefault("id", 0)
+    record.setdefault("active", True)
+    return record
 
-            if entry_id is None or entry_id in numeric_ids:
-                entry["id"] = next_id
-                next_id += 1
-            else:
-                entry["id"] = entry_id
-                numeric_ids.append(entry_id)
 
-            new_entries.append(entry)
+def sync(scraped_items):
+    existing = [_normalize(r) for r in load_data()]
+    by_key = {r.get("house_url"): r for r in existing}
+    next_id = max((r.get("id", 0) for r in existing), default=0) + 1
 
-        existing_data.extend(new_entries)
+    seen_keys = set()
+    new_count = price_changes = 0
+    for obj in scraped_items:
+        key = obj.house_url
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
 
-        with open(json_save_path, "w", encoding="utf-8") as f:
-            json.dump(existing_data, f, indent=4)
+        stored = by_key.get(key)
+        if stored is None:
+            record = asdict(obj)
+            record["id"] = next_id
+            record["active"] = True
+            next_id += 1
+            existing.append(record)
+            by_key[key] = record
+            new_count += 1
+        else:
+            stored["active"] = True
+            if stored.get(const.PRICE) != obj.price:
+                stored["old_price"] = stored.get(const.PRICE, 0)
+                stored[const.PRICE] = obj.price
+                price_changes += 1
 
-def get_json_file_count(json_save_path: str = None, reserve: int = 1):
-    global _next_id
+    # Reconcile visibility: anything stored but not seen this run is inactive.
+    # Guard against a fully-failed scrape wiping every item to inactive.
+    deactivated = 0
+    if seen_keys:
+        for record in existing:
+            if record.get("house_url") not in seen_keys and record.get("active"):
+                record["active"] = False
+                deactivated += 1
+    else:
+        logger.warning("No listings scraped this run; skipping inactive reconciliation.")
 
-    with _file_lock:
-        if _next_id is None:
-            data = get_json_file(json_save_path)
-            if not data:
-                _next_id = 1
-            else:
-                ids = [item.get("id") for item in data if isinstance(item, dict) and "id" in item]
-                try:
-                    numeric_ids = [int(i) for i in ids]
-                    _next_id = max(numeric_ids) + 1 if numeric_ids else 1
-                except Exception:
-                    _next_id = len(data) + 1
-
-        start_id = _next_id
-        _next_id += max(1, int(reserve))
-        return start_id
-
-def check_if_item_exists(item_address):
-    json_save_path = os.path.join(
-        config.general["base_dir"],
-        config.general["file_type"],
-        config.general["file_name"],
+    _atomic_write(_data_path(), existing)
+    logger.info(
+        "sync complete: %d total, %d new, %d price changes, %d deactivated",
+        len(existing), new_count, price_changes, deactivated,
     )
-    with _file_lock:
-        file = get_json_file(json_save_path)
-
-        for item in file:
-            if item.get("address") == item_address:
-                return True
-
-    return False
-
-
-def check_price_change(item_address, new_price):
-    json_save_path = os.path.join(
-        config.general["base_dir"],
-        config.general["file_type"],
-        config.general["file_name"],
-    )
-    with _file_lock:
-        file = get_json_file(json_save_path)
-
-        for item in file:
-            if item.get("address") == item_address:
-                return item.get("price") != new_price
-
-    return False
-
-
-def update_json_file_price(item_address, new_price):
-    json_save_path = os.path.join(
-        config.general["base_dir"],
-        config.general["file_type"],
-        config.general["file_name"],
-    )
-    with _file_lock:
-        file = get_json_file(json_save_path)
-
-        for item in file:
-            if item.get("address") == item_address:
-                if item.get("price") != new_price:
-                    item["old_price"] = item.get("price")
-                    item["price"] = new_price
-                    with open(json_save_path, "w", encoding="utf-8") as f:
-                        json.dump(file, f, indent=4)
-                    return True
-                return False
-
-    return False
-
-
-def get_json_file(json_save_path):
-    return check_and_create_json_file(json_save_path)
+    return existing
