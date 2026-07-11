@@ -73,6 +73,10 @@ def sync(scraped_items):
             new_count += 1
         else:
             stored["active"] = True
+            updated_fields = asdict(obj)
+            updated_fields.pop("id", None)
+            updated_fields.pop("active", None)
+            stored.update(updated_fields)
             if stored.get(const.PRICE) != obj.price:
                 stored["old_price"] = stored.get(const.PRICE, 0)
                 stored[const.PRICE] = obj.price

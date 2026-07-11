@@ -293,19 +293,54 @@ def extract_image(item, elements):
 
     if elements.get(const.IMAGE_SELECT):
         img_tag = item.select_one(elements[const.IMAGE_SELECT])
-        if img_tag and elements[const.IMAGE_ATTRS] in img_tag.attrs:
-            image_element = img_tag.attrs[elements[const.IMAGE_ATTRS]]
+        if img_tag:
+            image_element = get_image_source(img_tag, elements[const.IMAGE_ATTRS])
     elif elements[const.IMAGE_URL]:
         image_containers = item.find_all(class_=elements[const.IMAGE_URL])
         if image_containers:
             img_tag = item.find(class_=elements[const.IMAGE_URL]).find(elements[const.IMAGE_ELEMENT])
-            if img_tag and elements[const.IMAGE_ATTRS] in img_tag.attrs:
-                image_element = img_tag.attrs[elements[const.IMAGE_ATTRS]]
+            if img_tag:
+                image_element = get_image_source(img_tag, elements[const.IMAGE_ATTRS])
 
     if image_element and not url_starts_with_https(image_element):
         image_element = urljoin(elements[const.DOMAIN_URL], image_element)
 
     return image_element
+
+
+def get_image_source(img_tag, preferred_attr):
+    candidates = [preferred_attr, "data-src", "data-lazy-src", "data-srcset", "srcset", "src"]
+
+    for attr in candidates:
+        if attr not in img_tag.attrs:
+            continue
+
+        value = img_tag.attrs[attr]
+        if isinstance(value, list):
+            value = value[0]
+
+        if not value:
+            continue
+
+        if isinstance(value, str):
+            value = value.strip()
+
+        if not value or is_placeholder_image(value):
+            continue
+
+        if attr == "srcset":
+            value = value.split(",")[0].strip().split()[0]
+        elif attr == "data-srcset":
+            value = value.split(",")[0].strip().split()[0]
+
+        return value
+
+    return ""
+
+
+def is_placeholder_image(value):
+    lowered = str(value).strip().lower()
+    return lowered.startswith("data:image/svg+xml") or lowered.startswith("data:image/gif") or lowered in {"", "about:blank"}
 
 
 def extract_property_link(item, elements):
